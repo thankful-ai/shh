@@ -184,23 +184,23 @@ vimdiff \
 ## Key commands
 
 ```
-shh init			# initialize project, creating .shh file
-shh gen-keys			# generate keys
-shh get $secret_name		# get secret or secrets
-shh set $secret_name $value	# set value
-shh del $secret_name		# delete secret
-shh allow $user $secret		# allow access to secret
-shh deny $user $secret		# deny access to secret
-shh add-user [$user $pubkey]	# add user to project, default self
-shh rm-user $user		# remove user from project
-shh show [$user]		# show user's allowed and denied keys
-shh search $regex		# list all secrets containing the regex
-shh edit			# edit secret using $EDITOR
-shh rotate			# rotate your key
-shh serve			# start server to maintain password in memory
-shh login			# login to server
-shh version			# version info
-shh help			# usage info
+shh init                        # initialize project, creating .shh file
+shh gen-keys                    # generate keys
+shh get $secret_name            # get secret or secrets
+shh set $secret_name $value     # set value
+shh del $secret_name            # delete secret
+shh allow $user $secret         # allow access to secret
+shh deny $user $secret          # deny access to secret
+shh add-user [$user $pubkey]    # add user to project, default self
+shh rm-user $user               # remove user from project
+shh show [$user]                # show user's allowed and denied keys
+shh search $regex               # list all secrets containing the regex
+shh edit                        # edit secret using $EDITOR
+shh rotate                      # rotate your key
+shh serve                       # start server to maintain password in memory
+shh login                       # login to server
+shh version                     # version info
+shh help                        # usage info
 ```
 
 ## Example usage:
