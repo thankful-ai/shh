@@ -6,6 +6,12 @@ safe to commit to version control software like git.
 Unlike Hashicorp Vault, shh requires no infrastructure. There's no server to
 manage and secure -- just a single file.
 
+## Install
+
+```
+$ go get -u egt.run/pkg/shh
+```
+
 ## Getting started
 
 First, generate encryption keys:
