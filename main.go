@@ -36,10 +36,10 @@ func main() {
 		case *emptyArgError:
 			usage()
 		case *badArgError:
-			fmt.Println("error: " + err.Error())
+			fmt.Fprintln(os.Stderr, err.Error())
 			usage()
 		default:
-			fmt.Println("error: " + err.Error())
+			fmt.Fprintln(os.Stderr, err.Error())
 		}
 		os.Exit(1)
 	}
@@ -111,7 +111,7 @@ func run() error {
 	case "copy":
 		return copySecret(*shhFileName, tail)
 	case "version":
-		fmt.Println("1.6.0")
+		fmt.Println("1.6.1")
 		return nil
 	default:
 		return &badArgError{Arg: arg}
