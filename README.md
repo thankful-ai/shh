@@ -9,7 +9,7 @@ manage and secure -- just a single file.
 ## Install
 
 ```
-$ go get -u egt.run/pkg/shh
+$ go get -u egt.run/shh
 ```
 
 ## Getting started

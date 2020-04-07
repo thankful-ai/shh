@@ -1,4 +1,4 @@
-module egt.run/pkg/shh
+module egt.run/shh
 
 go 1.13
 
