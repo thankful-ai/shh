@@ -111,7 +111,7 @@ func run() error {
 	case "copy":
 		return copySecret(*shhFileName, tail)
 	case "version":
-		fmt.Println("1.6.1")
+		fmt.Println("1.6.3")
 		return nil
 	default:
 		return &badArgError{Arg: arg}
