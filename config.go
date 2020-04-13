@@ -35,12 +35,15 @@ func configFromPath(pth string) (*config, error) {
 	defer fi.Close()
 	conf := &config{}
 	scn := bufio.NewScanner(fi)
-	for scn.Scan() {
+	for i := 1; scn.Scan(); i++ {
 		line := scn.Text()
 		if line == "" {
 			continue
 		}
 		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid line %d: %s", i, line)
+		}
 		parts[0] = strings.TrimSpace(parts[0])
 		parts[1] = strings.TrimSpace(parts[1])
 		switch parts[0] {
