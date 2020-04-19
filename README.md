@@ -298,3 +298,12 @@ enough to prevent re-use/memorization and forcing use of a password manager.
 
 Each secret is encrypted with a random AES-256 key. The AES key is encrypted
 using your RSA private key and stored alongside the secret.
+
+## Future improvements
+
+- Add tests
+- Improve encryption/decryption code quality, DRY
+- Change storage format to hold global AES-encrypted secrets with individually
+  encrypted passwords
+- v2: Use ssh-agent rather than homegrown server. Removes `shh serve` and `shh
+  login`, `-n` non-interactive mode, memguard dependency

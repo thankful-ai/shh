@@ -36,25 +36,23 @@ type keys struct {
 
 // getUser from the ~/.config/shh/config file. If the user already exists in
 // the project's shh key, this returns nil User and nil error.
-func getUser(configPath string) (*user, error) {
-	config, err := configFromPath(configPath)
+func getUser(config *config) (*user, error) {
+	keys, err := getPublicKey(config.path)
 	if err != nil {
-		return nil, err
-	}
-
-	keys, err := getPublicKey(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("get public keys: %w", err)
+		return nil, fmt.Errorf("get public key: %w", err)
 	}
 	u := &user{
 		Username: config.Username,
 		Port:     config.Port,
 		Keys:     keys,
 	}
+	if u.Port == 0 {
+		u.Port = 4210
+	}
 	return u, nil
 }
 
-func createUser(configPath string) (*user, error) {
+func createUser(globalPath string) (*user, error) {
 	fmt.Print("username (usually email): ")
 	var uname string
 	_, err := fmt.Scan(&uname)
@@ -75,20 +73,21 @@ func createUser(configPath string) (*user, error) {
 	}
 
 	// Create ~/.config/shh folder
-	err = os.MkdirAll(configPath, 0700)
+	err = os.MkdirAll(globalPath, 0700)
 	if err != nil {
 		return nil, err
 	}
 
 	// Create public and private keys
-	user.Keys, err = createKeys(configPath, user.Password)
+	user.Keys, err = createKeys(globalPath, user.Password)
 	if err != nil {
 		return nil, fmt.Errorf("create keys: %w", err)
 	}
 
 	// Create initial config file (644) specifying username
 	content := []byte(fmt.Sprintf("username=%s", user.Username))
-	err = ioutil.WriteFile(filepath.Join(configPath, "config"), content, 0644)
+	err = ioutil.WriteFile(filepath.Join(globalPath, "config"), content,
+		0644)
 	if err != nil {
 		return nil, err
 	}

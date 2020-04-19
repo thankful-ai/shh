@@ -43,9 +43,9 @@ func newShh(path string) *shh {
 	}
 }
 
-// findShhRecursive checks for a file recursively up the filesystem until it
+// findFileRecursive checks for a file recursively up the filesystem until it
 // hits an error.
-func findShhRecursive(pth string) (string, error) {
+func findFileRecursive(pth string) (string, error) {
 	abs, err := filepath.Abs(pth)
 	if err != nil {
 		return "", fmt.Errorf("abs: %w", err)
@@ -57,7 +57,7 @@ func findShhRecursive(pth string) (string, error) {
 	_, err = os.Stat(pth)
 	switch {
 	case os.IsNotExist(err):
-		return findShhRecursive(filepath.Join("..", pth))
+		return findFileRecursive(filepath.Join("..", pth))
 	case err != nil:
 		return "", fmt.Errorf("stat: %w", err)
 	}
@@ -65,7 +65,7 @@ func findShhRecursive(pth string) (string, error) {
 }
 
 func shhFromPath(pth string) (*shh, error) {
-	recursivePath, err := findShhRecursive(pth)
+	recursivePath, err := findFileRecursive(pth)
 	switch {
 	case err == os.ErrNotExist:
 		err = nil // Ignore error, keep going

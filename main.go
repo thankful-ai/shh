@@ -48,22 +48,19 @@ func main() {
 func run() error {
 	nonInteractive := flag.Bool("n", false,
 		"Non-interactive mode. Fail if shh would prompt for the password")
-	shhFileName := flag.String("f", "", "Name of shh file (default .shh)")
+	shhFileName := flag.String("f", ".shh", "Name of shh file")
 	flag.Parse()
 
 	arg, tail := parseArg(flag.Args())
 	if arg == "" || arg == "help" {
 		return &emptyArgError{}
 	}
-	if *shhFileName == "" {
-		*shhFileName = ".shh"
-	}
 
 	// Enforce that a .shh file exists for anything for most commands
 	switch arg {
 	case "init", "gen-keys", "serve", "version": // Do nothing
 	default:
-		_, err := findShhRecursive(*shhFileName)
+		_, err := findFileRecursive(*shhFileName)
 		if os.IsNotExist(err) {
 			return fmt.Errorf("missing %s, run `shh init`",
 				*shhFileName)
@@ -111,7 +108,7 @@ func run() error {
 	case "copy":
 		return copySecret(*shhFileName, tail)
 	case "version":
-		fmt.Println("1.6.3")
+		fmt.Println("1.7.0")
 		return nil
 	default:
 		return &badArgError{Arg: arg}
@@ -142,18 +139,18 @@ func genKeys(args []string) error {
 	)
 	pledge(promises, execPromises)
 
-	configPath, err := getConfigPath()
+	global, _, err := getConfigPaths()
 	if err != nil {
 		return err
 	}
-	_, err = configFromPath(configPath)
+	_, err = configFromPaths(global, "")
 	if err == nil {
 		return errors.New("keys exist at ~/.config/shh, run `shh rotate` to change keys")
 	}
-	if _, err = createUser(configPath); err != nil {
+	if _, err = createUser(global); err != nil {
 		return err
 	}
-	backupReminder(true)
+	backupReminder(includeConfig)
 	return nil
 }
 
@@ -173,11 +170,15 @@ func initShh(filename string) error {
 	if _, err := os.Stat(filename); err == nil {
 		return fmt.Errorf("%s exists", filename)
 	}
-	configPath, err := getConfigPath()
+	global, project, err := getConfigPaths()
 	if err != nil {
 		return err
 	}
-	user, err := getUser(configPath)
+	conf, err := configFromPaths(global, project)
+	if err != nil {
+		return err
+	}
+	user, err := getUser(conf)
 	if err != nil {
 		return fmt.Errorf("get user: %w", err)
 	}
@@ -202,11 +203,15 @@ func get(nonInteractive bool, filename string, args []string) error {
 	pledge(promises, execPromises)
 
 	secretName := args[0]
-	configPath, err := getConfigPath()
+	global, project, err := getConfigPaths()
 	if err != nil {
 		return err
 	}
-	user, err := getUser(configPath)
+	conf, err := configFromPaths(global, project)
+	if err != nil {
+		return err
+	}
+	user, err := getUser(conf)
 	if err != nil {
 		return fmt.Errorf("get user: %w", err)
 	}
@@ -216,7 +221,10 @@ func get(nonInteractive bool, filename string, args []string) error {
 	}
 
 	// Now that we have our files, restrict further access
-	unveil(configPath, "r")
+	unveil(global, "r")
+	if project != "" {
+		unveil(project, "r")
+	}
 	unveil(shh.path, "r")
 	unveilBlock()
 
@@ -235,7 +243,7 @@ func get(nonInteractive bool, filename string, args []string) error {
 			return err
 		}
 	}
-	keys, err := getKeys(configPath, user.Password)
+	keys, err := getKeys(global, user.Password)
 	if err != nil {
 		return err
 	}
@@ -274,16 +282,20 @@ func set(filename string, args []string) error {
 	}
 
 	const (
-		promises     = "stdio rpath wpath cpath unix unveil"
+		promises     = "stdio rpath wpath cpath unveil"
 		execPromises = ""
 	)
 	pledge(promises, execPromises)
 
-	configPath, err := getConfigPath()
+	global, project, err := getConfigPaths()
 	if err != nil {
 		return err
 	}
-	user, err := getUser(configPath)
+	conf, err := configFromPaths(global, project)
+	if err != nil {
+		return err
+	}
+	user, err := getUser(conf)
 	if err != nil {
 		return err
 	}
@@ -301,12 +313,6 @@ func set(filename string, args []string) error {
 	}
 	key := args[0]
 	plaintext := args[1]
-
-	// Confirm that a secret under this name is not already in the global
-	// namespace
-	if _, exists := shh.namespace[key]; exists {
-		return errors.New("key exists")
-	}
 
 	// Encrypt content for each user with access to the secret
 	for username, secrets := range shh.Secrets {
@@ -335,6 +341,14 @@ func set(filename string, args []string) error {
 		}
 		stream := cipher.NewCFBEncrypter(aesBlock, iv)
 		stream.XORKeyStream(encrypted[aes.BlockSize:], []byte(plaintext))
+
+		// Ensure the user's key is in the project to prevent a panic
+		// below
+		if _, ok := shh.Keys[username]; !ok {
+			return fmt.Errorf(
+				"%s is not in the project, use add-user",
+				username)
+		}
 
 		// Encrypt the AES key using the public key
 		pubKey, err := x509.ParsePKCS1PublicKey(shh.Keys[username].Bytes)
@@ -373,11 +387,15 @@ func del(filename string, args []string) error {
 	pledge(promises, execPromises)
 
 	secret := args[0]
-	configPath, err := getConfigPath()
+	global, project, err := getConfigPaths()
 	if err != nil {
 		return err
 	}
-	user, err := getUser(configPath)
+	conf, err := configFromPaths(global, project)
+	if err != nil {
+		return err
+	}
+	user, err := getUser(conf)
 	if err != nil {
 		return err
 	}
@@ -433,12 +451,15 @@ func allow(nonInteractive bool, filename string, args []string) error {
 	username := username(args[0])
 	secretKey := args[1]
 
-	configPath, err := getConfigPath()
+	global, project, err := getConfigPaths()
 	if err != nil {
-		return fmt.Errorf("get config path: %w", err)
+		return err
 	}
-
-	user, err := getUser(configPath)
+	conf, err := configFromPaths(global, project)
+	if err != nil {
+		return err
+	}
+	user, err := getUser(conf)
 	if err != nil {
 		return fmt.Errorf("get user: %w", err)
 	}
@@ -449,7 +470,7 @@ func allow(nonInteractive bool, filename string, args []string) error {
 	}
 
 	// Now that we have our files, prevent further unveils
-	unveil(configPath, "r")
+	unveil(global, "r")
 	unveil(shh.path, "rwc")
 	unveilBlock()
 
@@ -474,7 +495,7 @@ func allow(nonInteractive bool, filename string, args []string) error {
 			return err
 		}
 	}
-	keys, err := getKeys(configPath, user.Password)
+	keys, err := getKeys(global, user.Password)
 	if err != nil {
 		return fmt.Errorf("get keys: %w", err)
 	}
@@ -606,11 +627,15 @@ func search(filename string, args []string) error {
 	}
 
 	// Decrypt all secrets belonging to current user
-	configPath, err := getConfigPath()
+	global, project, err := getConfigPaths()
 	if err != nil {
 		return err
 	}
-	user, err := getUser(configPath)
+	conf, err := configFromPaths(global, project)
+	if err != nil {
+		return err
+	}
+	user, err := getUser(conf)
 	if err != nil {
 		return fmt.Errorf("get user: %w", err)
 	}
@@ -618,7 +643,7 @@ func search(filename string, args []string) error {
 	if err != nil {
 		return err
 	}
-	keys, err := getKeys(configPath, user.Password)
+	keys, err := getKeys(global, user.Password)
 	if err != nil {
 		return fmt.Errorf("get keys: %w", err)
 	}
@@ -762,8 +787,16 @@ func show(filename string, args []string) error {
 func showAll(shh *shh) error {
 	secrets := shh.AllSecrets()
 	fmt.Println("====== SUMMARY ======")
-	fmt.Printf("%d users\n", len(shh.Keys))
-	fmt.Printf("%d secrets\n", len(secrets))
+	if len(shh.Keys) == 1 {
+		fmt.Println("1 user")
+	} else {
+		fmt.Printf("%d users\n", len(shh.Keys))
+	}
+	if len(secrets) == 1 {
+		fmt.Println("1 secret")
+	} else {
+		fmt.Printf("%d secrets\n", len(secrets))
+	}
 	fmt.Printf("\n")
 	fmt.Printf("======= USERS =======")
 	usernames := []string{}
@@ -782,7 +815,12 @@ func showAll(shh *shh) error {
 		}
 		sort.Strings(secrets)
 
-		fmt.Printf("\n%s (%d secrets)\n", uname, len(userSecrets))
+		if len(userSecrets) == 1 {
+			fmt.Printf("\n%s (1 secret)\n", uname)
+		} else {
+			fmt.Printf("\n%s (%d secrets)\n", uname,
+				len(userSecrets))
+		}
 		for _, secret := range secrets {
 			fmt.Printf("> %s\n", secret)
 		}
@@ -824,11 +862,15 @@ func edit(nonInteractive bool, filename string, args []string) error {
 	)
 	pledge(promises, execPromises)
 
-	configPath, err := getConfigPath()
+	global, project, err := getConfigPaths()
 	if err != nil {
 		return err
 	}
-	user, err := getUser(configPath)
+	conf, err := configFromPaths(global, project)
+	if err != nil {
+		return err
+	}
+	user, err := getUser(conf)
 	if err != nil {
 		return fmt.Errorf("get user: %w", err)
 	}
@@ -843,7 +885,7 @@ func edit(nonInteractive bool, filename string, args []string) error {
 			return err
 		}
 	}
-	keys, err := getKeys(configPath, user.Password)
+	keys, err := getKeys(global, user.Password)
 	if err != nil {
 		return err
 	}
@@ -1014,7 +1056,11 @@ func rotate(filename string, args []string) error {
 		return fmt.Errorf("request new password: %w", err)
 	}
 
-	configPath, err := getConfigPath()
+	global, project, err := getConfigPaths()
+	if err != nil {
+		return err
+	}
+	conf, err := configFromPaths(global, project)
 	if err != nil {
 		return err
 	}
@@ -1022,7 +1068,7 @@ func rotate(filename string, args []string) error {
 	// Generate new keys (different names). Note we do not use os.TempDir
 	// because we'll be renaming the files later, and we can't rename files
 	// across partitions (common for Linux)
-	tmpDir := filepath.Join(configPath, "tmp")
+	tmpDir := filepath.Join(global, "tmp")
 	if err = os.Mkdir(tmpDir, 0777); err != nil {
 		return fmt.Errorf("make tmp dir: %w", err)
 	}
@@ -1033,13 +1079,13 @@ func rotate(filename string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("create keys: %w", err)
 	}
-	user, err := getUser(configPath)
+	user, err := getUser(conf)
 	if err != nil {
 		return fmt.Errorf("get user: %w", err)
 	}
 
 	// Decrypt all AES secrets for user, re-encrypt with new key
-	oldKeys, err := getKeys(configPath, oldPass)
+	oldKeys, err := getKeys(global, oldPass)
 	if err != nil {
 		return err
 	}
@@ -1077,15 +1123,15 @@ func rotate(filename string, args []string) error {
 
 	// First create backups of our existing keys
 	err = copyFile(
-		filepath.Join(configPath, "id_rsa.bak"),
-		filepath.Join(configPath, "id_rsa"),
+		filepath.Join(global, "id_rsa.bak"),
+		filepath.Join(global, "id_rsa"),
 	)
 	if err != nil {
 		return fmt.Errorf("back up id_rsa: %w", err)
 	}
 	err = copyFile(
-		filepath.Join(configPath, "id_rsa.pub.bak"),
-		filepath.Join(configPath, "id_rsa.pub"),
+		filepath.Join(global, "id_rsa.pub.bak"),
+		filepath.Join(global, "id_rsa.pub"),
 	)
 	if err != nil {
 		return fmt.Errorf("back up id_rsa.pub: %w", err)
@@ -1099,29 +1145,29 @@ func rotate(filename string, args []string) error {
 	// Move new keys on top of current keys in the filesystem
 	err = os.Rename(
 		filepath.Join(tmpDir, "id_rsa"),
-		filepath.Join(configPath, "id_rsa"),
+		filepath.Join(global, "id_rsa"),
 	)
 	if err != nil {
 		return fmt.Errorf("replace id_rsa: %w", err)
 	}
 	err = os.Rename(
 		filepath.Join(tmpDir, "id_rsa.pub"),
-		filepath.Join(configPath, "id_rsa.pub"),
+		filepath.Join(global, "id_rsa.pub"),
 	)
 	if err != nil {
 		return fmt.Errorf("replace id_rsa.pub: %w", err)
 	}
 
 	// Delete our backed up keys
-	err = os.Remove(filepath.Join(configPath, "id_rsa.bak"))
+	err = os.Remove(filepath.Join(global, "id_rsa.bak"))
 	if err != nil {
 		return fmt.Errorf("delete id_rsa.bak: %w", err)
 	}
-	err = os.Remove(filepath.Join(configPath, "id_rsa.pub.bak"))
+	err = os.Remove(filepath.Join(global, "id_rsa.pub.bak"))
 	if err != nil {
 		return fmt.Errorf("delete id_rsa.pub.bak: %w", err)
 	}
-	backupReminder(false)
+	backupReminder(skipConfig)
 	return nil
 }
 
@@ -1142,18 +1188,19 @@ func addUser(filename string, args []string) error {
 		return err
 	}
 
-	// Now that we have our files, restrict further access
-	unveil(shh.path, "rwc")
-
 	var u *user
 	if len(args) == 0 {
 		// Default to self
-		configPath, err := getConfigPath()
+		global, project, err := getConfigPaths()
 		if err != nil {
 			return err
 		}
-		unveil(configPath, "r")
-		u, err = getUser(configPath)
+		conf, err := configFromPaths(global, project)
+		if err != nil {
+			return err
+		}
+		unveil(global, "r")
+		u, err = getUser(conf)
 		if err != nil {
 			return fmt.Errorf("get user: %w", err)
 		}
@@ -1162,6 +1209,7 @@ func addUser(filename string, args []string) error {
 	}
 
 	// We're done reading files
+	unveil(shh.path, "rwc")
 	unveilBlock()
 
 	if _, exist := shh.Keys[u.Username]; exist {
@@ -1213,14 +1261,18 @@ func serve(args []string) error {
 		return errors.New("bad args: expected none")
 	}
 
-	configPath, err := getConfigPath()
+	global, project, err := getConfigPaths()
 	if err != nil {
 		return err
 	}
-	unveil(configPath, "r")
+	conf, err := configFromPaths(global, project)
+	if err != nil {
+		return err
+	}
+	unveil(global, "r")
 	unveilBlock()
 
-	user, err := getUser(configPath)
+	user, err := getUser(conf)
 	if err != nil {
 		return fmt.Errorf("get user: %w", err)
 	}
@@ -1299,13 +1351,17 @@ func login(args []string) error {
 	)
 	pledge(promises, execPromises)
 
-	configPath, err := getConfigPath()
+	global, project, err := getConfigPaths()
 	if err != nil {
 		return err
 	}
-	unveil(configPath, "r")
+	conf, err := configFromPaths(global, project)
+	if err != nil {
+		return err
+	}
+	unveil(global, "r")
 
-	user, err := getUser(configPath)
+	user, err := getUser(conf)
 	if err != nil {
 		return fmt.Errorf("get user: %w", err)
 	}
@@ -1328,7 +1384,7 @@ func login(args []string) error {
 	}
 
 	// Verify the password before continuing
-	if _, err = getKeys(configPath, user.Password); err != nil {
+	if _, err = getKeys(global, user.Password); err != nil {
 		return err
 	}
 	buf := bytes.NewBuffer(user.Password)
@@ -1375,38 +1431,45 @@ func usage() {
 	shh [flags] [command]
 
 global commands:
-	init			initialize store or add self to existing store
-	get $name		get secret
-	set $name $val		set secret
-	del $name		delete a secret
+	init                    initialize store or add self to existing store
+	get $name               get secret
+	set $name $val          set secret
+	del $name               delete a secret
 	copy $old $new          copy a secret, maintaining the same team access
 	rename $old $new        rename a secret
-	allow $user $secret	allow user access to a secret
-	deny $user $secret	deny user access to a secret
+	allow $user $secret     allow user access to a secret
+	deny $user $secret      deny user access to a secret
 	add-user $user $pubkey  add user to project given their public key
-	rm-user $user		remove user from project
-	search $regex		list all secrets containing the regex
-	show [$user]		show user's allowed and denied keys
-	edit			edit a secret using $EDITOR
-	rotate			rotate key
-	serve			start server to maintain password in memory
-	login			login to server to maintain password in memory
-	version			version information
-	help			usage info
+	rm-user $user           remove user from project
+	search $regex           list all secrets containing the regex
+	show [$user]            show user's allowed and denied keys
+	edit                    edit a secret using $EDITOR
+	rotate                  rotate key
+	serve                   start server to maintain password in memory
+	gen-keys                generate global keys and configuration files
+	login                   login to server to maintain password in memory
+	version                 version information
+	help                    usage info
 
 flags:
-	-n			Non-interactive mode. Fail if shh would prompt for the password
-	-f			shh filename. Defaults to .shh`)
+	-n                      Non-interactive mode. Fail if shh would prompt for the password
+	-f                      shh filename. Defaults to .shh`)
 }
 
-func backupReminder(withConfig bool) {
+type configOpt bool
+
+const (
+	includeConfig configOpt = true
+	skipConfig    configOpt = false
+)
+
+func backupReminder(withConfig configOpt) {
 	if withConfig {
 		fmt.Println("> generated ~/.config/shh/config")
 	}
 	fmt.Println("> generated ~/.config/shh/id_rsa")
 	fmt.Println("> generated ~/.config/shh/id_rsa.pub")
 	fmt.Println(">")
-	fmt.Println("> be sure to back up your ~/.config/shh/id_rsa and")
-	fmt.Println("> remember your password, or you may lose access to your")
-	fmt.Println("> secrets!")
+	fmt.Println("> be sure to back up your ~/.config/shh/id_rsa and remember your password, or")
+	fmt.Println("> you may lose access to your secrets!")
 }
