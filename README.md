@@ -121,6 +121,16 @@ their secrets and delete their public key from `.shh`:
 shh rm-user alice@example.com
 ```
 
+## Project-level settings
+
+If you want to change your username on a per-project basis, create a
+`.shhconfig` file next to `.shh` at the project's root. The format is the same
+as ~/.config/shh/config:
+
+```
+username=bob@example.com
+```
+
 ## Advanced usage
 
 ### Serve and login
