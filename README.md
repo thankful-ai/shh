@@ -327,8 +327,8 @@ encrypted using your RSA private key and stored alongside the secret.
 
 As of v1.8.0, the following security vulnerability is fixed:
 
-- Previously, secrets were vulnerable to an Oracle Padding Attack, as our use
-  of AES-CFB did not include any authentication mechanism. Switching to AES-GCM
+- Previously, secrets were vulnerable to a padding oracle attack, as our use of
+  AES-CFB did not include any authentication mechanism. Switching to AES-GCM
   prevents this attack. You should regenerate any keys that were stored in .shh
   and shared.
 
