@@ -6,6 +6,18 @@ safe to commit to version control software like git.
 Unlike Hashicorp Vault, shh requires no infrastructure. There's no server to
 manage and secure -- just a single file.
 
+> **NOTE:** This code has not been audited, and was not written by an expert
+> cryptographer. Caveat emptor.
+>
+> While I make every effort to follow Go stdlib's crypto examples closely and
+> research best practices, I am not an expert in the field. There might be
+> vulnerabilities, and some might be severe. Until this is audited, you should
+> treat secrets stored by shh as "better than plaintext, but not by much."
+>
+> If you have a background in cryptography and wish to help audit or provide
+> feedback, please reach out on the [mailing
+> list](mailto:~egtann/shh@lists.sr.ht).
+
 ## Install
 
 ```
@@ -303,17 +315,25 @@ shh get staging/env | ssh alice@staging "cat > server.env"
 
 shh uses envelope encryption to keep your project secrets secure. `gen-key`
 creates 4096-bit RSA keys in your home directory, encrypting the private key
-using AES-256 with a mandated 24-char minimum length password, which is long
-enough to prevent re-use/memorization and forcing use of a password manager.
+with a mandated 24-char minimum length password, which is long enough to
+prevent re-use/memorization and forcing use of a password manager.
 
-Each secret is encrypted with a random AES-256 key. The AES key is encrypted
-using your RSA private key and stored alongside the secret.
+Each secret is encrypted with a random AES-256 key using GCM. The AES key is
+encrypted using your RSA private key and stored alongside the secret.
+
+## Security bulletins
+
+### v1.8.0
+
+As of v1.8.0, the following security vulnerability is fixed:
+
+- Previously, secrets were vulnerable to an Oracle Padding Attack, as our use
+  of AES-CFB did not include any authentication mechanism. Switching to AES-GCM
+  prevents this attack. You should regenerate any keys that were stored in .shh
+  and shared.
 
 ## Future improvements
 
 - Add tests
-- Improve encryption/decryption code quality, DRY
-- Change storage format to hold global AES-encrypted secrets with individually
-  encrypted passwords
 - v2: Use ssh-agent rather than homegrown server. Removes `shh serve` and `shh
   login`, `-n` non-interactive mode, memguard dependency

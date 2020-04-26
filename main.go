@@ -2,14 +2,7 @@ package main
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha1"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -23,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,6 +50,11 @@ func run() error {
 		return &emptyArgError{}
 	}
 
+	// migrateShh file automatically to the latest version.
+	if err := migrateShh(*shhFileName); err != nil {
+		return fmt.Errorf("migrate shh: %w", err)
+	}
+
 	// Enforce that a .shh file exists for anything for most commands
 	switch arg {
 	case "init", "gen-keys", "serve", "version": // Do nothing
@@ -83,32 +82,32 @@ func run() error {
 		return set(*shhFileName, tail)
 	case "del":
 		return del(*shhFileName, tail)
-	case "edit":
-		return edit(*nonInteractive, *shhFileName, tail)
 	case "allow":
 		return allow(*nonInteractive, *shhFileName, tail)
 	case "deny":
 		return deny(*shhFileName, tail)
-	case "add-user":
-		return addUser(*shhFileName, tail)
-	case "rm-user":
-		return rmUser(*shhFileName, tail)
-	case "rotate":
-		return rotate(*shhFileName, tail)
+	case "search":
+		return search(*shhFileName, tail)
 	case "serve":
 		return serve(tail)
 	case "login":
 		return login(tail)
-	case "show":
-		return show(*shhFileName, tail)
-	case "search":
-		return search(*shhFileName, tail)
+	case "add-user":
+		return addUser(*shhFileName, tail)
+	case "rm-user":
+		return rmUser(*shhFileName, tail)
 	case "rename":
 		return rename(*shhFileName, tail)
 	case "copy":
-		return copySecret(*shhFileName, tail)
+		return copySecret(*nonInteractive, *shhFileName, tail)
+	case "show":
+		return show(*shhFileName, tail)
+	case "edit":
+		return edit(*nonInteractive, *shhFileName, tail)
+	case "rotate":
+		return rotate(*shhFileName, tail)
 	case "version":
-		fmt.Println("1.7.0")
+		fmt.Println("1.8.0")
 		return nil
 	default:
 		return &badArgError{Arg: arg}
@@ -228,10 +227,6 @@ func get(nonInteractive bool, filename string, args []string) error {
 	unveil(shh.path, "r")
 	unveilBlock()
 
-	secrets, err := shh.GetSecretsForUser(secretName, user.Username)
-	if err != nil {
-		return err
-	}
 	if nonInteractive {
 		user.Password, err = requestPasswordFromServer(user.Port, false)
 		if err != nil {
@@ -247,31 +242,15 @@ func get(nonInteractive bool, filename string, args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, secret := range secrets {
-		// Decrypt the AES key using the private key
-		aesKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader,
-			keys.PrivateKey, []byte(secret.AESKey), nil)
-		if err != nil {
-			return fmt.Errorf("decrypt secret: %w", err)
-		}
-
-		// Use the decrypted AES key to decrypt the secret
-		aesBlock, err := aes.NewCipher(aesKey)
-		if err != nil {
-			return err
-		}
-
-		if len(secret.Encrypted) < aes.BlockSize {
-			return errors.New("encrypted secret too short")
-		}
-		ciphertext := []byte(secret.Encrypted)
-		iv := ciphertext[:aes.BlockSize]
-		ciphertext = ciphertext[aes.BlockSize:]
-		stream := cipher.NewCFBDecrypter(aesBlock, iv)
-		plaintext := make([]byte, len(ciphertext))
-		stream.XORKeyStream(plaintext, []byte(ciphertext))
-		fmt.Print(string(plaintext))
+	secret, ok := shh.Secrets[secretName]
+	if !ok {
+		return fmt.Errorf("%s does not exist", secretName)
 	}
+	plaintext, err := secret.decrypt(user.Username, keys.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("decrypt: %w", err)
+	}
+	fmt.Print(plaintext)
 	return nil
 }
 
@@ -308,73 +287,30 @@ func set(filename string, args []string) error {
 	unveil(shh.path, "rwc")
 	unveilBlock()
 
-	if _, exist := shh.Secrets[user.Username]; !exist {
-		shh.Secrets[user.Username] = map[string]secret{}
-	}
-	key := args[0]
+	secretName := args[0]
 	plaintext := args[1]
 
-	// Encrypt content for each user with access to the secret
-	for username, secrets := range shh.Secrets {
-		if username != user.Username {
-			if _, ok := secrets[key]; !ok {
-				continue
-			}
+	secret, ok := shh.Secrets[secretName]
+	if !ok {
+		// If this secret doesn't exist, create it, and give this user
+		// access.
+		secret = &Secret{
+			Users: map[username][]byte{
+				user.Username: nil,
+			},
 		}
-
-		// Generate an AES key to encrypt the data. We use AES-256
-		// which requires a 32-byte key
-		aesKey := make([]byte, 32)
-		if _, err := rand.Read(aesKey); err != nil {
-			return err
-		}
-		aesBlock, err := aes.NewCipher(aesKey)
-		if err != nil {
-			return err
-		}
-
-		// Encrypt the secret using the new AES key
-		encrypted := make([]byte, aes.BlockSize+len(plaintext))
-		iv := encrypted[:aes.BlockSize]
-		if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-			return fmt.Errorf("read iv: %w", err)
-		}
-		stream := cipher.NewCFBEncrypter(aesBlock, iv)
-		stream.XORKeyStream(encrypted[aes.BlockSize:], []byte(plaintext))
-
-		// Ensure the user's key is in the project to prevent a panic
-		// below
-		if _, ok := shh.Keys[username]; !ok {
-			return fmt.Errorf(
-				"%s is not in the project, use add-user",
-				username)
-		}
-
-		// Encrypt the AES key using the public key
-		pubKey, err := x509.ParsePKCS1PublicKey(shh.Keys[username].Bytes)
-		if err != nil {
-			return fmt.Errorf("parse public key: %w", err)
-		}
-		encryptedAES, err := rsa.EncryptOAEP(sha256.New(), rand.Reader,
-			pubKey, aesKey, nil)
-		if err != nil {
-			return fmt.Errorf("reencrypt secret: %w", err)
-		}
-
-		// We base64 encode all encrypted data before passing it into
-		// the .shh file
-		sec := secret{
-			AESKey:    base64.StdEncoding.EncodeToString(encryptedAES),
-			Encrypted: base64.StdEncoding.EncodeToString(encrypted),
-		}
-		shh.Secrets[username][key] = sec
 	}
+	if err = secret.encrypt(plaintext, shh.Keys); err != nil {
+		return fmt.Errorf("encrypt: %w", err)
+	}
+	shh.Secrets[secretName] = secret
+
 	return shh.EncodeToFile()
 }
 
-// del deletes a secret for all users if the user has access to the secret. The
-// user can manually delete secrets belonging to others, but this prevents
-// accidentally deleting secrets belonging to others.
+// del deletes a secret for all users. The user does not need to have access to
+// the secret to delete it, nor could shh enforce that since one could simply
+// delete the secret from the file manually.
 func del(filename string, args []string) error {
 	if len(args) != 1 {
 		return errors.New("bad args: expected `del $secret`")
@@ -386,19 +322,8 @@ func del(filename string, args []string) error {
 	)
 	pledge(promises, execPromises)
 
-	secret := args[0]
-	global, project, err := getConfigPaths()
-	if err != nil {
-		return err
-	}
-	conf, err := configFromPaths(global, project)
-	if err != nil {
-		return err
-	}
-	user, err := getUser(conf)
-	if err != nil {
-		return err
-	}
+	secretName := args[0]
+
 	shh, err := shhFromPath(filename)
 	if err != nil {
 		return err
@@ -408,32 +333,12 @@ func del(filename string, args []string) error {
 	unveil(shh.path, "rwc")
 	unveilBlock()
 
-	// Confirm that the secret exists at all
-	if _, exists := shh.namespace[secret]; !exists {
+	if _, ok := shh.Secrets[secretName]; !ok {
 		return errors.New("secret does not exist")
 	}
+	delete(shh.Secrets, secretName)
 
-	// Get all secrets matching a search term. This throws an error if no
-	// matching secrets are found.
-	secretsToDelete, err := shh.GetSecretsForUser(secret, user.Username)
-	if err != nil {
-		return err
-	}
-
-	// Delete all matching secrets across every user in the project
-	for username := range shh.Keys {
-		userSecrets := shh.Secrets[username]
-		for key := range secretsToDelete {
-			delete(userSecrets, key)
-		}
-		if len(userSecrets) == 0 {
-			delete(shh.Secrets, username)
-		}
-	}
-	if err = shh.EncodeToFile(); err != nil {
-		return fmt.Errorf("encode to file: %w", err)
-	}
-	return nil
+	return shh.EncodeToFile()
 }
 
 // allow a user to access a secret. You must have access yourself.
@@ -448,8 +353,8 @@ func allow(nonInteractive bool, filename string, args []string) error {
 	)
 	pledge(promises, execPromises)
 
-	username := username(args[0])
-	secretKey := args[1]
+	usernameToAdd := username(args[0])
+	secretName := args[1]
 
 	global, project, err := getConfigPaths()
 	if err != nil {
@@ -474,13 +379,10 @@ func allow(nonInteractive bool, filename string, args []string) error {
 	unveil(shh.path, "rwc")
 	unveilBlock()
 
-	block, exist := shh.Keys[username]
-	if !exist {
-		return fmt.Errorf("%q is not a user in the project. try `shh add-user %s $PUBKEY`", username, username)
-	}
-	pubKey, err := x509.ParsePKCS1PublicKey(block.Bytes)
-	if err != nil {
-		return fmt.Errorf("parse public key: %w", err)
+	if _, ok := shh.Keys[usernameToAdd]; !ok {
+		return fmt.Errorf("%s is not a user in the project. "+
+			"try `shh add-user %s $PUBKEY`", usernameToAdd,
+			usernameToAdd)
 	}
 
 	// Decrypt all matching secrets
@@ -499,75 +401,35 @@ func allow(nonInteractive bool, filename string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("get keys: %w", err)
 	}
-	secrets, err := shh.GetSecretsForUser(secretKey, user.Username)
-	if err != nil {
-		return err
-	}
+
+	secrets := shh.secretsForGlob(secretName)
 	if len(secrets) == 0 {
-		return errors.New("no matching secrets which you can access")
+		return errors.New("secret does not exist")
 	}
-	if _, exist := shh.Secrets[username]; !exist {
-		shh.Secrets[username] = map[string]secret{}
-	}
-	for key, sec := range secrets {
-		// Decrypt AES key using personal RSA key
-		aesKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader,
-			keys.PrivateKey, []byte(sec.AESKey), nil)
+	for i := range secrets {
+		secret := secrets[i]
+
+		// Add our user to the secret, then decrypt it using our own
+		// key, and re-encrypt it using the new user's key. This
+		// re-encrypts for every user, but that's just a side-effect of
+		// our simple encrypt API.
+		secret.Users[usernameToAdd] = []byte{}
+		plaintext, err := secret.decrypt(user.Username,
+			keys.PrivateKey)
 		if err != nil {
-			return fmt.Errorf("decrypt secret: %w", err)
+			return fmt.Errorf("decrypt: %w", err)
 		}
-		aesBlock, err := aes.NewCipher(aesKey)
+		err = secret.encrypt(plaintext, shh.Keys)
 		if err != nil {
-			return err
+			return fmt.Errorf("encrypt: %w", err)
 		}
-		ciphertext := []byte(sec.Encrypted)
-		iv := ciphertext[:aes.BlockSize]
-		ciphertext = ciphertext[aes.BlockSize:]
-		stream := cipher.NewCFBDecrypter(aesBlock, iv)
-		plaintext := make([]byte, len(ciphertext))
-		stream.XORKeyStream(plaintext, []byte(ciphertext))
-
-		// Generate an AES key to encrypt the data. We use AES-256
-		// which requires a 32-byte key
-		aesKey = make([]byte, 32)
-		if _, err := rand.Read(aesKey); err != nil {
-			return err
-		}
-		aesBlock, err = aes.NewCipher(aesKey)
-		if err != nil {
-			return err
-		}
-
-		// Encrypt the secret using the new AES key
-		encrypted := make([]byte, aes.BlockSize+len(plaintext))
-		iv = encrypted[:aes.BlockSize]
-		if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-			return fmt.Errorf("read iv: %w", err)
-		}
-		stream = cipher.NewCFBEncrypter(aesBlock, iv)
-		stream.XORKeyStream(encrypted[aes.BlockSize:], []byte(plaintext))
-
-		// Encrypt the AES key using the public key
-		encryptedAES, err := rsa.EncryptOAEP(sha256.New(), rand.Reader,
-			pubKey, aesKey, nil)
-		if err != nil {
-			return fmt.Errorf("reencrypt secret: %w", err)
-		}
-
-		// We base64 encode all encrypted data before passing it into
-		// the .shh file
-		sec := secret{
-			AESKey:    base64.StdEncoding.EncodeToString(encryptedAES),
-			Encrypted: base64.StdEncoding.EncodeToString(encrypted),
-		}
-
-		// Add encrypted data and key to .shh
-		shh.Secrets[username][key] = sec
 	}
 	return shh.EncodeToFile()
 }
 
-// deny a user from accessing secrets.
+// deny a user from accessing secrets. Even when removed from access to all
+// secrets, their public key will be left untouched in the .shh file and should
+// be removed manually with `shh rm-user $user`.
 func deny(filename string, args []string) error {
 	if len(args) > 2 {
 		return errors.New("bad args: expected `deny $user [$secret]`")
@@ -579,27 +441,30 @@ func deny(filename string, args []string) error {
 	)
 	pledge(promises, execPromises)
 
-	var secretKey string
+	usernameToDeny := username(args[0])
+	var secretName string
 	if len(args) == 1 {
-		secretKey = "*"
+		secretName = "*"
 	} else {
-		secretKey = args[1]
+		secretName = args[1]
 	}
-	username := username(args[0])
 	shh, err := shhFromPath(filename)
 	if err != nil {
 		return err
 	}
-	secrets, err := shh.GetSecretsForUser(secretKey, username)
-	if err != nil {
-		return err
+
+	if _, ok := shh.Keys[usernameToDeny]; !ok {
+		return fmt.Errorf("%s is not a user in the project",
+			usernameToDeny)
 	}
-	userSecrets := shh.Secrets[username]
-	for key := range secrets {
-		delete(userSecrets, key)
+
+	secrets := shh.secretsForGlob(secretName)
+	if len(secrets) == 0 {
+		return errors.New("secret does not exist")
 	}
-	if len(userSecrets) == 0 {
-		delete(shh.Secrets, username)
+	for i := range secrets {
+		secret := secrets[i]
+		delete(secret.Users, usernameToDeny)
 	}
 	return shh.EncodeToFile()
 }
@@ -647,42 +512,35 @@ func search(filename string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("get keys: %w", err)
 	}
-	secrets, err := shh.GetSecretsForUser("*", user.Username)
-	if err != nil {
-		return fmt.Errorf("get secrets: %w", err)
-	}
-	if len(secrets) == 0 {
-		return errors.New("no matching secrets which you can access")
-	}
-	var matches []string
-	for key, sec := range secrets {
-		// Decrypt AES key using personal RSA key
-		aesKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader,
-			keys.PrivateKey, []byte(sec.AESKey), nil)
-		if err != nil {
-			return fmt.Errorf("decrypt secret: %w", err)
-		}
-		aesBlock, err := aes.NewCipher(aesKey)
-		if err != nil {
-			return err
-		}
-		ciphertext := []byte(sec.Encrypted)
-		iv := ciphertext[:aes.BlockSize]
-		ciphertext = ciphertext[aes.BlockSize:]
-		stream := cipher.NewCFBDecrypter(aesBlock, iv)
-		plaintext := make([]byte, len(ciphertext))
-		stream.XORKeyStream(plaintext, []byte(ciphertext))
 
-		// Search for the term
-		if regex.Match(plaintext) {
-			matches = append(matches, key)
+	// Since we're searching the content of secrets, report an error if the
+	// user has no access to anything that matches the glob, since that's
+	// probably unexpected for the user.
+	var hasAccess bool
+	for _, s := range shh.Secrets {
+		if _, ok := s.Users[user.Username]; ok {
+			hasAccess = true
 		}
+	}
+	if !hasAccess {
+		return errors.New("no secrets matched, do you have access?")
 	}
 
-	// Output secret names containing the term in separate lines (can then
-	// be passed into xargs, etc.)
-	for _, match := range matches {
-		fmt.Println(match)
+	// Search each secret and print matches
+	for secretName, s := range shh.Secrets {
+		if _, ok := s.Users[user.Username]; !ok {
+			continue
+		}
+		plaintext, err := s.decrypt(user.Username, keys.PrivateKey)
+		if err != nil {
+			return fmt.Errorf("decrypt: %w", err)
+		}
+
+		// Output secret names containing the term in separate lines
+		// (can then be passed into xargs, etc.)
+		if regex.Match([]byte(plaintext)) {
+			fmt.Println(secretName)
+		}
 	}
 	return nil
 }
@@ -712,30 +570,26 @@ func rename(filename string, args []string) error {
 	unveil(shh.path, "rwc")
 	unveilBlock()
 
-	if _, ok := shh.namespace[oldName]; !ok {
+	if _, ok := shh.Secrets[oldName]; !ok {
 		return errors.New("secret does not exist")
 	}
-	if _, ok := shh.namespace[newName]; ok {
+	if _, ok := shh.Secrets[newName]; ok {
 		return errors.New("secret already exists by that name")
 	}
-	for _, labelSecrets := range shh.Secrets {
-		if _, ok := labelSecrets[oldName]; !ok {
-			continue
-		}
-		labelSecrets[newName] = labelSecrets[oldName]
-		delete(labelSecrets, oldName)
-	}
+	shh.Secrets[newName] = shh.Secrets[oldName]
+	delete(shh.Secrets, oldName)
+
 	return shh.EncodeToFile()
 }
 
 // copySecret for each user that has access to the current secret.
-func copySecret(filename string, args []string) error {
+func copySecret(nonInteractive bool, filename string, args []string) error {
 	if len(args) != 2 {
 		return errors.New("bad args: expected `copy $old $new`")
 	}
 
 	const (
-		promises     = "stdio rpath wpath cpath tty unveil"
+		promises     = "stdio rpath wpath cpath tty inet unveil"
 		execPromises = ""
 	)
 	pledge(promises, execPromises)
@@ -748,23 +602,57 @@ func copySecret(filename string, args []string) error {
 	if err != nil {
 		return err
 	}
+	global, project, err := getConfigPaths()
+	if err != nil {
+		return err
+	}
+	conf, err := configFromPaths(global, project)
+	if err != nil {
+		return err
+	}
+	user, err := getUser(conf)
+	if err != nil {
+		return fmt.Errorf("get user: %w", err)
+	}
+	if nonInteractive {
+		user.Password, err = requestPasswordFromServer(user.Port, false)
+		if err != nil {
+			return err
+		}
+	} else {
+		user.Password, err = requestPassword(user.Port, defaultPasswordPrompt)
+		if err != nil {
+			return err
+		}
+	}
+	keys, err := getKeys(global, user.Password)
+	if err != nil {
+		return err
+	}
 
 	// Now that we have our files, restrict further access
 	unveil(shh.path, "rwc")
 	unveilBlock()
 
-	if _, ok := shh.namespace[oldName]; !ok {
+	if _, ok := shh.Secrets[oldName]; !ok {
 		return errors.New("secret does not exist")
 	}
-	if _, ok := shh.namespace[newName]; ok {
+	if _, ok := shh.Secrets[newName]; ok {
 		return errors.New("secret already exists by that name")
 	}
-	for _, labelSecrets := range shh.Secrets {
-		if _, ok := labelSecrets[oldName]; !ok {
-			continue
-		}
-		labelSecrets[newName] = labelSecrets[oldName]
+	shh.Secrets[newName] = shh.Secrets[oldName]
+
+	secret := shh.Secrets[newName]
+
+	// Re-encrypt so as not to reveal that these two secrets are the same
+	plaintext, err := secret.decrypt(user.Username, keys.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("decrypt: %w", err)
 	}
+	if err = secret.encrypt(plaintext, shh.Keys); err != nil {
+		return fmt.Errorf("encrypt: %w", err)
+	}
+
 	return shh.EncodeToFile()
 }
 
@@ -784,42 +672,52 @@ func show(filename string, args []string) error {
 }
 
 // showAll users and sorted secrets alongside a summary.
-func showAll(shh *shh) error {
-	secrets := shh.AllSecrets()
+func showAll(shh *shhV1) error {
 	fmt.Println("====== SUMMARY ======")
 	if len(shh.Keys) == 1 {
 		fmt.Println("1 user")
 	} else {
 		fmt.Printf("%d users\n", len(shh.Keys))
 	}
-	if len(secrets) == 1 {
+	if len(shh.Secrets) == 1 {
 		fmt.Println("1 secret")
 	} else {
-		fmt.Printf("%d secrets\n", len(secrets))
+		fmt.Printf("%d secrets\n", len(shh.Secrets))
 	}
 	fmt.Printf("\n")
 	fmt.Printf("======= USERS =======")
-	usernames := []string{}
+
+	// Sort usernames and secrets to give consistent output
+	var usernames, secrets []string
 	for uname := range shh.Keys {
 		usernames = append(usernames, string(uname))
 	}
 	sort.Strings(usernames)
-	for _, uname := range usernames {
-		// Sort secrets to give consistent output
-		var i int
-		userSecrets := shh.Secrets[username(uname)]
-		secrets := make([]string, len(userSecrets))
-		for secretName := range userSecrets {
-			secrets[i] = secretName
-			i++
-		}
-		sort.Strings(secrets)
+	for s := range shh.Secrets {
+		secrets = append(secrets, s)
+	}
+	sort.Strings(secrets)
 
-		if len(userSecrets) == 1 {
-			fmt.Printf("\n%s (1 secret)\n", uname)
+	// Organize secrets by user. This is O(n*m) but isn't that common of an
+	// operation. We iterate through secrets in the outer loop because most
+	// projects have more secrets than people with access.
+	userSecrets := map[username][]string{}
+	for _, secretName := range secrets {
+		for _, u := range usernames {
+			uname := username(u)
+			if _, ok := shh.Secrets[secretName].Users[uname]; !ok {
+				continue
+			}
+			userSecrets[uname] = append(userSecrets[uname],
+				secretName)
+		}
+	}
+	for _, u := range usernames {
+		secrets := userSecrets[username(u)]
+		if len(secrets) == 1 {
+			fmt.Printf("\n%s (1 secret)\n", u)
 		} else {
-			fmt.Printf("\n%s (%d secrets)\n", uname,
-				len(userSecrets))
+			fmt.Printf("\n%s (%d secrets)\n", u, len(secrets))
 		}
 		for _, secret := range secrets {
 			fmt.Printf("> %s\n", secret)
@@ -829,20 +727,20 @@ func showAll(shh *shh) error {
 }
 
 // showUser secrets, sorted.
-func showUser(shh *shh, username username) error {
-	userSecrets, ok := shh.Secrets[username]
-	if !ok {
+func showUser(shh *shhV1, username username) error {
+	var secrets []string
+	for secretName, s := range shh.Secrets {
+		if _, ok := s.Users[username]; ok {
+			secrets = append(secrets, secretName)
+		}
+	}
+	if len(secrets) == 0 {
 		return fmt.Errorf("unknown user: %s", username)
 	}
-	var i int
-	secrets := make([]string, len(userSecrets))
-	for secretName := range userSecrets {
-		secrets[i] = secretName
-		i++
-	}
 	sort.Strings(secrets)
+
 	for _, secret := range secrets {
-		fmt.Printf("> %s\n", secret)
+		fmt.Printf("%s\n", secret)
 	}
 	return nil
 }
@@ -896,12 +794,11 @@ func edit(nonInteractive bool, filename string, args []string) error {
 	}
 	unveil(shh.path, "rwc")
 
-	secrets, err := shh.GetSecretsForUser(args[0], user.Username)
-	if err != nil {
-		return err
-	}
-	if len(secrets) > 1 {
-		return errors.New("mulitple secrets found, cannot use *")
+	secretName := args[0]
+
+	secret, ok := shh.Secrets[secretName]
+	if !ok {
+		return fmt.Errorf("%s does not exist", secretName)
 	}
 
 	// Expose /tmp for creating a tmp file, a shell to run commands, our
@@ -920,47 +817,24 @@ func edit(nonInteractive bool, filename string, args []string) error {
 	}
 	defer fi.Close()
 
-	// Copy decrypted secret into tmp file
-	var plaintext, aesKey []byte
-	var key string
-	for k, sec := range secrets {
-		key = k
-
-		// Decrypt the AES key using the private key
-		aesKey, err = rsa.DecryptOAEP(sha256.New(), rand.Reader,
-			keys.PrivateKey, []byte(sec.AESKey), nil)
-		if err != nil {
-			return fmt.Errorf("decrypt secret: %w", err)
-		}
-
-		// Use the decrypted AES key to decrypt the secret
-		aesBlock, err := aes.NewCipher(aesKey)
-		if err != nil {
-			return err
-		}
-		if len(sec.Encrypted) < aes.BlockSize {
-			return errors.New("encrypted secret too short")
-		}
-		ciphertext := []byte(sec.Encrypted)
-		iv := ciphertext[:aes.BlockSize]
-		ciphertext = ciphertext[aes.BlockSize:]
-		stream := cipher.NewCFBDecrypter(aesBlock, iv)
-		plaintext = make([]byte, len(ciphertext))
-		stream.XORKeyStream(plaintext, []byte(ciphertext))
+	// Copy decrypted secret into the temporary file
+	plaintext, err := secret.decrypt(user.Username, keys.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("decrypt: %w", err)
 	}
-	if _, err = io.Copy(fi, bytes.NewReader(plaintext)); err != nil {
+	if _, err = io.Copy(fi, strings.NewReader(plaintext)); err != nil {
 		return fmt.Errorf("copy: %w", err)
 	}
 
 	// Checksum the plaintext, so we can exit early if nothing changed
 	// (i.e. don't re-encrypt on saves without changes)
 	h := sha1.New()
-	if _, err = h.Write(plaintext); err != nil {
+	if _, err = h.Write([]byte(plaintext)); err != nil {
 		return fmt.Errorf("write hash: %w", err)
 	}
 	origHash := hex.EncodeToString(h.Sum(nil))
 
-	// Open tmp file in vim
+	// Open tmp file in our $EDITOR
 	cmd := exec.Command("/bin/sh", "-c", "$EDITOR "+fi.Name())
 	cmd.Stdout = os.Stdout
 	cmd.Stdin = os.Stdin
@@ -971,13 +845,14 @@ func edit(nonInteractive bool, filename string, args []string) error {
 		return fmt.Errorf("wait: %w", err)
 	}
 
-	// Check if the contents have changed. If not, we can exit early
-	plaintext, err = ioutil.ReadFile(fi.Name())
+	// At this point we've exited the editor. Check if the contents have
+	// changed. If not, we can exit shh early
+	newPlaintext, err := ioutil.ReadFile(fi.Name())
 	if err != nil {
 		return fmt.Errorf("read all: %w", err)
 	}
 	h = sha1.New()
-	if _, err = h.Write(plaintext); err != nil {
+	if _, err = h.Write(newPlaintext); err != nil {
 		return fmt.Errorf("write hash: %w", err)
 	}
 	newHash := hex.EncodeToString(h.Sum(nil))
@@ -985,51 +860,12 @@ func edit(nonInteractive bool, filename string, args []string) error {
 		return nil
 	}
 
-	// Re-encrypt content for each user with access to the secret
-	for username, secrets := range shh.Secrets {
-		if _, ok := secrets[key]; !ok {
-			continue
-		}
-
-		// Generate an AES key to encrypt the data. We use AES-256
-		// which requires a 32-byte key
-		aesKey = make([]byte, 32)
-		if _, err := rand.Read(aesKey); err != nil {
-			return err
-		}
-		aesBlock, err := aes.NewCipher(aesKey)
-		if err != nil {
-			return err
-		}
-
-		// Encrypt the secret using the new AES key
-		encrypted := make([]byte, aes.BlockSize+len(plaintext))
-		iv := encrypted[:aes.BlockSize]
-		if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-			return fmt.Errorf("read iv: %w", err)
-		}
-		stream := cipher.NewCFBEncrypter(aesBlock, iv)
-		stream.XORKeyStream(encrypted[aes.BlockSize:], []byte(plaintext))
-
-		// Encrypt the AES key using the public key
-		pubKey, err := x509.ParsePKCS1PublicKey(shh.Keys[username].Bytes)
-		if err != nil {
-			return fmt.Errorf("parse public key: %w", err)
-		}
-		encryptedAES, err := rsa.EncryptOAEP(sha256.New(), rand.Reader,
-			pubKey, aesKey, nil)
-		if err != nil {
-			return fmt.Errorf("reencrypt secret: %w", err)
-		}
-
-		// We base64 encode all encrypted data before passing it into
-		// the .shh file
-		sec := secret{
-			AESKey:    base64.StdEncoding.EncodeToString(encryptedAES),
-			Encrypted: base64.StdEncoding.EncodeToString(encrypted),
-		}
-		shh.Secrets[username][key] = sec
+	// If we're here, the content changed. Re-encrypt content for each user
+	// with access to the secret.
+	if err = secret.encrypt(string(newPlaintext), shh.Keys); err != nil {
+		return fmt.Errorf("encrypt: %w", err)
 	}
+
 	return shh.EncodeToFile()
 }
 
@@ -1093,33 +929,20 @@ func rotate(filename string, args []string) error {
 	if err != nil {
 		return err
 	}
-	secrets := shh.Secrets[user.Username]
-	for key, sec := range secrets {
-		// Decrypt AES key using old key
-		byt, err := base64.StdEncoding.DecodeString(sec.AESKey)
-		if err != nil {
-			return fmt.Errorf("decode base64: %w", err)
+	shh.Keys[user.Username] = keys.PublicKeyBlock
+	for _, secret := range shh.Secrets {
+		if _, ok := secret.Users[user.Username]; !ok {
+			continue
 		}
-		aesKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader,
-			oldKeys.PrivateKey, byt, nil)
+		plaintext, err := secret.decrypt(user.Username,
+			oldKeys.PrivateKey)
 		if err != nil {
-			return fmt.Errorf("decrypt secret: %w", err)
+			return fmt.Errorf("decrypt: %w", err)
 		}
-
-		// Re-encrypt using new public key
-		encryptedAES, err := rsa.EncryptOAEP(sha256.New(), rand.Reader,
-			keys.PublicKey, aesKey, nil)
-		if err != nil {
-			return fmt.Errorf("reencrypt secret: %w", err)
-		}
-		shh.Secrets[user.Username][key] = secret{
-			AESKey:    base64.StdEncoding.EncodeToString(encryptedAES),
-			Encrypted: sec.Encrypted,
+		if err = secret.encrypt(plaintext, shh.Keys); err != nil {
+			return fmt.Errorf("encrypt: %w", err)
 		}
 	}
-
-	// Update public key in project file
-	shh.Keys[user.Username] = keys.PublicKeyBlock
 
 	// First create backups of our existing keys
 	err = copyFile(
@@ -1249,8 +1072,10 @@ func rmUser(filename string, args []string) error {
 	if _, exist := shh.Keys[username]; !exist {
 		return errors.New("user not found")
 	}
+	for _, s := range shh.Secrets {
+		delete(s.Users, username)
+	}
 	delete(shh.Keys, username)
-	delete(shh.Secrets, username)
 	return shh.EncodeToFile()
 }
 

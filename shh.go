@@ -1,21 +1,69 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
-type shh struct {
+var b64 = base64.StdEncoding
+
+type Secret struct {
+	// Value is the AES-GCM encrypted text appended to the random nonce. It
+	// is base64 encoded.
+	Value []byte `json:"value"`
+
+	// Users maps usernames to encrypted passwords which, when decrypted
+	// using RSA, are used to decrypt the Value.
+	Users map[username][]byte `json:"users"`
+}
+
+// shhV1 describes the .shh file containing secrets and public keys.
+type shhV1 struct {
+	// Secrets maps secretName -> (secretValue, Users). Secret names and
+	// values are shared project-wide, so there can only be one instance of
+	// any secret, the AES key for which is encrypted for each user using
+	// their respective RSA public keys.
+	Secrets map[string]*Secret `json:"secrets"`
+
+	// Keys are RSA public keys used to encrypt secrets for each user.
+	Keys map[username]*pem.Block `json:"keys"`
+
+	// Version of the shh file. Note that this is independent of the shh
+	// binary's version.
+	Version int `json:"version"`
+
+	// path of the .shh file itself.
+	path string
+}
+
+// shhV0 describes the legacy .shh file format containing secrets and public
+// keys. This format was abandoned because:
+//
+// 1. There's a security vulnerability in that AES secrets are not
+//    authenticated, which allows for padded-oracle attacks.
+// 2. Data was needlessly duplicated in the data structure, then deduplicated
+//    at runtime. As a result of this change, `namespace` is no longer needed
+//    in shhV1.
+// 3. The new structure allows for a much cleaner API to interact with the
+//    data, deduplicating encryption/decryption logic and simplifying the code
+//    throughout.
+type shhV0 struct {
 	// Secrets maps users -> secret_labels -> secret_value. Each secret is
 	// uniquely encrypted for each user given their public key.
-	Secrets map[username]map[string]secret `json:"secrets"`
+	Secrets map[username]map[string]aesSecret `json:"secrets"`
 
 	// Keys are public keys used to encrypt secrets for each user.
 	Keys map[username]*pem.Block `json:"keys"`
@@ -29,17 +77,17 @@ type shh struct {
 	path string
 }
 
-type secret struct {
+type aesSecret struct {
 	AESKey    string `json:"key"`
 	Encrypted string `json:"value"`
 }
 
-func newShh(path string) *shh {
-	return &shh{
-		Secrets:   map[username]map[string]secret{},
-		Keys:      map[username]*pem.Block{},
-		namespace: map[string]struct{}{},
-		path:      path,
+func newShh(path string) *shhV1 {
+	return &shhV1{
+		Secrets: map[string]*Secret{},
+		Keys:    map[username]*pem.Block{},
+		Version: 1,
+		path:    path,
 	}
 }
 
@@ -64,7 +112,7 @@ func findFileRecursive(pth string) (string, error) {
 	return pth, nil
 }
 
-func shhFromPath(pth string) (*shh, error) {
+func shhFromPath(pth string) (*shhV1, error) {
 	recursivePath, err := findFileRecursive(pth)
 	switch {
 	case err == os.ErrNotExist:
@@ -91,15 +139,10 @@ func shhFromPath(pth string) (*shh, error) {
 	case err != nil:
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	for _, secrets := range shh.Secrets {
-		for secretName := range secrets {
-			shh.namespace[secretName] = struct{}{}
-		}
-	}
 	return shh, nil
 }
 
-func (s *shh) EncodeToFile() error {
+func (s *shhV1) EncodeToFile() error {
 	flags := os.O_TRUNC | os.O_CREATE | os.O_WRONLY
 	fi, err := os.OpenFile(s.path, flags, 0644)
 	if err != nil {
@@ -109,80 +152,283 @@ func (s *shh) EncodeToFile() error {
 	return s.Encode(fi)
 }
 
-func (s *shh) Encode(w io.Writer) error {
+func (s *shhV1) Encode(w io.Writer) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "\t")
 	return enc.Encode(s)
 }
 
-// GetSecretsForUser. If there's an exact key match, the secret will be
-// returned. If not, the "*" glob matches all secrets after the glob. If used,
-// the glob must be the last character. This is supported: `staging/*` whereas
-// this is not: `staging/*/database_url` (this returns an error). This function
-// only returns nil alongside an error. It may return an empty slice.
-func (s *shh) GetSecretsForUser(key string, user username) (map[string]secret, error) {
-	if key == "" {
-		return nil, errors.New("empty key")
+// decrypt a secret returning plaintext.
+func (s *Secret) decrypt(
+	u username,
+	privKey *rsa.PrivateKey,
+) (string, error) {
+	// Ensure we check that the user has access to the file in the first
+	// place
+	base64AESEncKey, ok := s.Users[u]
+	if !ok {
+		return "", errors.New("no access")
 	}
-	if user == "" {
-		return nil, errors.New("empty user")
+
+	tmp, err := b64.DecodeString(string(base64AESEncKey))
+	if err != nil {
+		return "", fmt.Errorf("base64: %w", err)
 	}
-	userSecrets, exist := s.Secrets[user]
-	if !exist {
-		s.Secrets[user] = map[string]secret{}
+	aesEncKey := []byte(tmp)
+
+	// Decrypt the user's private id_rsa key with the provided password,
+	// then use the RSA private key to decrypt the AES password.
+	key, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privKey,
+		aesEncKey, nil)
+	if err != nil {
+		return "", fmt.Errorf("oaep: %w", err)
 	}
-	sec, exist := userSecrets[key]
-	if exist {
-		tmp, err := base64.StdEncoding.DecodeString(sec.AESKey)
-		if err != nil {
-			return nil, fmt.Errorf("decode b64 aes key: %w", err)
-		}
-		sec.AESKey = string(tmp)
-		tmp, err = base64.StdEncoding.DecodeString(sec.Encrypted)
-		if err != nil {
-			return nil, fmt.Errorf("decode b64 secret: %w", err)
-		}
-		sec.Encrypted = string(tmp)
-		return map[string]secret{key: sec}, nil
+
+	// Decrypt the secret Value using the AES password with GCM, which
+	// offers Authenticated Encryption. This follows the example in Go's
+	// stdlib:
+	// https://godoc.org/crypto/cipher#NewGCM
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
 	}
-	glob := strings.Index(key, "*")
-	if glob == -1 {
-		return nil, errors.New("no secret found")
+	aesgcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
 	}
-	if glob < len(key)-1 {
-		return nil, errors.New("invalid glob: must be last character")
+	ciphertext, err := b64.DecodeString(string(s.Value))
+	if err != nil {
+		return "", fmt.Errorf("base64: %w", err)
 	}
-	key = key[:len(key)-1]
-	matches := map[string]secret{}
-	for k, v := range userSecrets {
-		match := strings.HasPrefix(k, key)
-		if match {
-			byt, err := base64.StdEncoding.DecodeString(v.AESKey)
-			if err != nil {
-				return nil, fmt.Errorf("decode b64 aes key: %w", err)
-			}
-			v.AESKey = string(byt)
-			byt, err = base64.StdEncoding.DecodeString(v.Encrypted)
-			if err != nil {
-				return nil, fmt.Errorf("decode b64 encrypted: %w", err)
-			}
-			v.Encrypted = string(byt)
-			matches[k] = v
-		}
+	nonceSize := aesgcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return "", errors.New("encrypted secret too short")
 	}
-	return matches, nil
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := aesgcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", fmt.Errorf("aes open: %w", err)
+	}
+	return string(plaintext), nil
 }
 
-func (s *shh) AllSecrets() []string {
-	seen := map[string]struct{}{}
-	for _, userSecrets := range s.Secrets {
-		for name := range userSecrets {
-			seen[name] = struct{}{}
+// encrypt for all users.
+func (s *Secret) encrypt(
+	plaintext string,
+	pubKeys map[username]*pem.Block,
+) error {
+	// Generate an AES key to encrypt the data. We use AES-256 which
+	// requires a 32-byte key. We make a new key each time we encrypt
+	// secrets to remove the risk of a nonce collision. This AES code
+	// follows the example in Go's stdlib:
+	//
+	// https://godoc.org/crypto/cipher#NewGCM
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return err
+	}
+	nonce := make([]byte, 12)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return err
+	}
+	aesgcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+	ciphertext := aesgcm.Seal(nil, nonce, []byte(plaintext), nil)
+	s.Value = []byte(b64.EncodeToString(append(nonce, ciphertext...)))
+
+	// Reencrypt the AES key for each user using their own RSA key. We use
+	// OAEP per the recommendation of the Go stdlib docs:
+	//
+	//	The original specification for encryption and signatures with
+	//	RSA is PKCS#1 and the terms "RSA encryption" and "RSA
+	//	signatures" by default refer to PKCS#1 version 1.5. However,
+	//	that specification has flaws and new designs should use version
+	//	two, usually called by just OAEP and PSS, where possible.
+	//
+	// https://golang.org/pkg/crypto/rsa/
+	for u := range s.Users {
+		// Encrypt the AES key using the public key
+		pubKey, err := x509.ParsePKCS1PublicKey(pubKeys[u].Bytes)
+		if err != nil {
+			return fmt.Errorf("parse public key: %w", err)
+		}
+		encAESKey, err := rsa.EncryptOAEP(sha256.New(), rand.Reader,
+			pubKey, key, nil)
+		if err != nil {
+			return fmt.Errorf("oaep: %w", err)
+		}
+		s.Users[u] = []byte(b64.EncodeToString(encAESKey))
+	}
+	return nil
+}
+
+// secretsForGlob returns all secret names which match a glob pattern in O(n).
+func (s *shhV1) secretsForGlob(globPattern string) []*Secret {
+	var secrets []*Secret
+	for secretName, secret := range s.Secrets {
+		if glob(globPattern, secretName) {
+			secrets = append(secrets, secret)
 		}
 	}
-	secrets := []string{}
-	for name := range seen {
-		secrets = append(secrets, name)
-	}
 	return secrets
+}
+
+// migrateShh from any previous versions to the lastest version.
+func migrateShh(filename string) error {
+	byt, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("read file: %w", err)
+	}
+	data := map[string]interface{}{}
+	if err := json.Unmarshal(byt, &data); err != nil {
+		return fmt.Errorf("unmarshal: %w", err)
+	}
+	val, ok := data["version"]
+	if !ok {
+		// Default to version 0
+		val = float64(0)
+	}
+	fltVersion, ok := val.(float64)
+	if !ok {
+		return errors.New("bad version")
+	}
+	switch fltVersion {
+	case 0:
+		if err = migrateShhV0(filename, byt); err != nil {
+			return fmt.Errorf("migrate v0: %w", err)
+		}
+		return nil
+	case 1:
+		// This is the current version. Nothing to do.
+		return nil
+	default:
+		return errors.New("unknown version")
+	}
+}
+
+// migrateShhV0 to v1. This is a one-time migration that moves from AES-CFB to
+// AES-GCM (preventing Oracle Padding Attacks) and improves the data-structure
+// of the underlying file to reduce filesize and improve performance of the
+// most common shh operations.
+func migrateShhV0(filename string, byt []byte) error {
+	fmt.Println("performing a one-time migration of .shh from v0 to v1")
+	global, project, err := getConfigPaths()
+	if err != nil {
+		return err
+	}
+	conf, err := configFromPaths(global, project)
+	if err != nil {
+		return err
+	}
+	self, err := getUser(conf)
+	if err != nil {
+		return fmt.Errorf("get user: %w", err)
+	}
+	self.Password, err = requestPassword(self.Port, defaultPasswordPrompt)
+	if err != nil {
+		return err
+	}
+	self.Keys, err = getKeys(global, self.Password)
+	if err != nil {
+		return err
+	}
+
+	fi, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+
+	shhOld := &shhV0{}
+	if json.NewDecoder(fi).Decode(shhOld); err != nil {
+		return fmt.Errorf("decode: %w", err)
+	}
+
+	shhNew := &shhV1{
+		Keys:    shhOld.Keys,
+		Secrets: map[string]*Secret{},
+		Version: 1,
+		path:    filename,
+	}
+
+	// Report an error if the user running the migration doesn't have
+	// access to every secret, since we're unable to convert the old
+	// per-user encrypted form to the new, project-wide data structure.
+	var secretCount int
+	for _, oldSecrets := range shhOld.Secrets {
+		if len(oldSecrets) > secretCount {
+			secretCount = len(oldSecrets)
+		}
+	}
+	if len(shhOld.Secrets[self.Username]) != secretCount {
+		return errors.New("you do not have access to every secret, " +
+			"so shh cannot perform a one-time security " +
+			"migration automatically. ask for access (or " +
+			"delete secrets to which you do not have access), " +
+			"then re-run")
+	}
+
+	// Remap secrets from the old form to the new form:
+	//
+	// shhOld.Secrets map[username]map[secretName]aesSecret
+	// to
+	// shhNew.Secrets map[secretName]*Secret
+	for secretName, aesSecret := range shhOld.Secrets[self.Username] {
+		if _, ok := shhNew.Secrets[secretName]; !ok {
+			shhNew.Secrets[secretName] = &Secret{
+				Users: map[username][]byte{},
+			}
+		}
+		for user, userSecrets := range shhOld.Secrets {
+			if _, ok := userSecrets[secretName]; !ok {
+				continue
+			}
+			shhNew.Secrets[secretName].Users[user] = []byte{}
+		}
+
+		// Decrypt the user-specific version using the AES key
+		encAESKey, err := b64.DecodeString(string(aesSecret.AESKey))
+		if err != nil {
+			return fmt.Errorf("decode: %w", err)
+		}
+		key, err := rsa.DecryptOAEP(sha256.New(), rand.Reader,
+			self.Keys.PrivateKey, []byte(encAESKey), nil)
+		if err != nil {
+			return fmt.Errorf("decrypt secret: %w", err)
+		}
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			return err
+		}
+		aesEncSecret, err := b64.DecodeString(
+			string(aesSecret.Encrypted))
+		if err != nil {
+			return fmt.Errorf("decode: %w", err)
+		}
+		ciphertext := []byte(aesEncSecret)
+		iv := ciphertext[:aes.BlockSize]
+		ciphertext = ciphertext[aes.BlockSize:]
+		stream := cipher.NewCFBDecrypter(block, iv)
+		plaintext := make([]byte, len(ciphertext))
+		stream.XORKeyStream(plaintext, ciphertext)
+
+		// ciphertext now contains the plaintext, since it was
+		// decrypted in place.
+		err = shhNew.Secrets[secretName].encrypt(string(plaintext),
+			shhNew.Keys)
+		if err != nil {
+			return fmt.Errorf("encrypt: %w", err)
+		}
+	}
+
+	if err = shhNew.EncodeToFile(); err != nil {
+		return err
+	}
+	fmt.Println("done")
+	return nil
 }
