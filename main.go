@@ -758,12 +758,6 @@ func edit(nonInteractive bool, filename string, args []string) error {
 		return errors.New("must set $EDITOR")
 	}
 
-	const (
-		promises     = "stdio rpath wpath cpath tty proc exec inet unveil"
-		execPromises = "stdio rpath wpath cpath tty proc exec error"
-	)
-	pledge(promises, execPromises)
-
 	global, project, err := getConfigPaths()
 	if err != nil {
 		return err
@@ -796,7 +790,6 @@ func edit(nonInteractive bool, filename string, args []string) error {
 	if err != nil {
 		return err
 	}
-	unveil(shh.path, "rwc")
 
 	secretName := args[0]
 
@@ -804,15 +797,6 @@ func edit(nonInteractive bool, filename string, args []string) error {
 	if !ok {
 		return fmt.Errorf("%s does not exist", secretName)
 	}
-
-	// Expose /tmp for creating a tmp file, a shell to run commands, our
-	// configured editor, as well as necessary libraries.
-	unveil("/tmp", "rwc")
-	unveil("/usr", "r")
-	unveil("/var/run", "r")
-	unveil("/bin/sh", "x")
-	unveil(os.Getenv("EDITOR"), "rx")
-	unveilBlock()
 
 	// Create tmp file
 	fi, err := ioutil.TempFile("", "shh")
