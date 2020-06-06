@@ -102,7 +102,7 @@ ensure they're added to the project, which will require their public key
 generated via `gen-key`:
 
 ```
-shh add-user alice@example.com pubkey.pem
+shh add-user alice@example.com "$(cat alice_id_rsa.pub)"
 ```
 
 Now they're added to the project, but they don't have access to any keys:
