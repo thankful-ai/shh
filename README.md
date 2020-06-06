@@ -319,7 +319,7 @@ with a mandated 24-char minimum length password, which is long enough to
 prevent re-use/memorization and forcing use of a password manager.
 
 Each secret is encrypted with a random AES-256 key using GCM. The AES key is
-encrypted using your RSA private key and stored alongside the secret.
+encrypted using your RSA public key and stored alongside the secret.
 
 ## Security bulletins
 
