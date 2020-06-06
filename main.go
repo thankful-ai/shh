@@ -51,7 +51,11 @@ func run() error {
 	}
 
 	// migrateShh file automatically to the latest version.
-	if err := migrateShh(*shhFileName); err != nil {
+	err := migrateShh(*shhFileName)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// No need to migrate
+	case err != nil:
 		return fmt.Errorf("migrate shh: %w", err)
 	}
 
