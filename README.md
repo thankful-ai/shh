@@ -332,6 +332,11 @@ As of v1.8.0, the following security vulnerability is fixed:
   prevents this attack. You should regenerate any keys that were stored in .shh
   and shared.
 
+## Project Contact
+
+The best way to communicate bugs or provide patches is through the [mailing
+list](https://lists.sr.ht/~egtann/shh).
+
 ## Future improvements
 
 - Add tests
