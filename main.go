@@ -111,7 +111,7 @@ func run() error {
 	case "rotate":
 		return rotate(*shhFileName, tail)
 	case "version":
-		fmt.Println("1.8.0")
+		fmt.Println("1.8.1")
 		return nil
 	default:
 		return &badArgError{Arg: arg}
