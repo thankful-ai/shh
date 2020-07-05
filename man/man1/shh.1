@@ -1,0 +1,121 @@
+.Dd $Mdocdate$
+.Dt SHH 1
+.Os
+.Sh NAME
+.Nm shh
+.Nd secret manager
+.Sh SYNOPSIS
+.Nm shh
+.Bk -words
+.Op Fl f Ar file
+.Op Fl n
+.Cm command ...
+.Ek
+.Sh DESCRIPTION
+The
+.Nm
+utility encrypts project secrets to a single file.  It produces an encrypted
+file that is safe to commit to version control and share among a team.
+.Pp
+In commands below, you may substitute names of secrets and users either
+partially or completely for a glob
+.Sq \(** .
+Take care to quote the name to prevent shell expansion.  See the EXAMPLES
+section below.
+.Pp
+.Nm
+is controlled through the following commands:
+.Pp
+.Bl -tag -width Ds
+.It Cm init
+Initialize the shh file, or if one already exists, add your public key to the
+existing file.
+.It Cm get Ar name
+Get secret.
+.It Cm set Ar name Ar val
+Set secret to value for all users.
+.It Cm del Ar name
+Delete secret for all users.
+.It Cm copy Ar old-name Ar new-name
+Copy a secret, preserving team access.
+.It Cm rename Ar old-name Ar new-name
+Rename a secret.
+.It Cm allow Ar user Ar secret
+Allow user access to a secret.  You must also have access.
+.It Cm deny Ar user Ar secret
+Deny user access to a secret.
+.It Cm add-user Ar user Ar pubkey
+Add user to the project given their pubkey.
+.It Cm rm-user Ar user
+Remove user from the project.
+.It Cm search Ar regex
+List all secrets containing the regular expression.
+.It Cm show Bq Ar user
+Show all allowed keys, or show a specific user's allowed keys.
+.It Cm edit Ar name
+Edit a secret using $EDITOR.
+.It Cm rotate
+Rotate your public and private keys and re-encrypt all secrets.
+.It Cm serve
+Start server to maintain password in memory for one hour, which is useful when
+running scripts.  This server is often backgrounded and used in conjunction
+with Cm login.
+.It Cm gen-keys
+Generate global keys and configuration files.
+.It Cm login
+Login to server from Cm serve to maintain password in memory.
+.It Cm version
+Version information.
+.It Cm help
+Usage information.  Equivalent to -h.
+.El
+.Pp
+The options are as follows:
+.Pp
+.Bl -tag -width xxxxxxx -compact
+.It Fl f Ar file
+Path to the shh file (default ".shh")
+.It Fl h
+Help.
+.It Fl n
+Non-interactive mode.  Fail if shh would prompt for the password.
+.El
+.Sh EXAMPLES
+.Pp
+Add Alice to the project and grant access to all secrets namespaced under
+"staging":
+.Bd -literal -offset indent
+shh add-user alice@example.com "$(cat alice_id_rsa.pub)"
+shh allow alice@example.com "staging/*"
+.Ed
+.Pp
+See the difference in secrets granted between two users:
+.Bd -literal -offset indent
+diff -y <(shh show alice@example.com) <(shh show bob@example.com)
+.Ed
+.Pp
+Edit all files containing a regular expression:
+.Bd -literal -offset indent
+shh search "\d{8,}" | xargs -I % -o shh edit %
+.Ed
+.Pp
+Count the number of secrets to which a user has access:
+.Bd -literal -offset indent
+shh show bob@example.com | wc -l
+.Ed
+.Pp
+See the changes in a secret across git commits:
+.Bd -literal -offset indent
+vimdiff \e
+	<(shh -f <(git show commit_1:.shh) get my_secret) \e
+	<(shh -f <(git show commit_2:.shh) get my_secret)
+.Ed
+.Pp
+Stream a secret from the encrypted file directly to a server:
+.Bd -literal -offset indent
+shh get staging/env | ssh alice@staging "cat > server.env"
+.Ed
+.Sh EXIT STATUS
+.Ex -std
+.Sh AUTHORS
+.An Evan Tann Aq Mt os@evantann.com

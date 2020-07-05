@@ -1239,34 +1239,7 @@ func copyFile(dst, src string) error {
 }
 
 func usage() {
-	fmt.Println(`usage:
-
-	shh [flags] [command]
-
-global commands:
-	init                    initialize store or add self to existing store
-	get $name               get secret
-	set $name $val          set secret
-	del $name               delete a secret
-	copy $old $new          copy a secret, maintaining the same team access
-	rename $old $new        rename a secret
-	allow $user $secret     allow user access to a secret
-	deny $user $secret      deny user access to a secret
-	add-user $user $pubkey  add user to project given their public key
-	rm-user $user           remove user from project
-	search $regex           list all secrets containing the regex
-	show [$user]            show user's allowed and denied keys
-	edit                    edit a secret using $EDITOR
-	rotate                  rotate key
-	serve                   start server to maintain password in memory
-	gen-keys                generate global keys and configuration files
-	login                   login to server to maintain password in memory
-	version                 version information
-	help                    usage info
-
-flags:
-	-n                      Non-interactive mode. Fail if shh would prompt for the password
-	-f                      shh filename. Defaults to .shh`)
+	fmt.Println(`usage: shh [-f file] [-n] command ...`)
 }
 
 type configOpt bool
