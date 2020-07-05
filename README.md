@@ -34,7 +34,7 @@ After installation, check the man pages for usage information for shh(1).
 
 ## Encryption details
 
-shh uses envelope encryption to keep your project secrets secure. `gen-key`
+shh(1) uses envelope encryption to keep your project secrets secure. `gen-key`
 creates 4096-bit RSA keys in your home directory, encrypting the private key
 with a mandated 24-char minimum length password, which is long enough to
 prevent re-use/memorization and forcing use of a password manager.
@@ -61,5 +61,5 @@ list](mailto:~egtann/all@lists.sr.ht).
 ## Future improvements
 
 - Add tests
-- v2: Use ssh-agent rather than homegrown server. Removes `shh serve` and `shh
+- v2: Use ssh-agent rather than homegrown server. Remove `shh serve` and `shh
   login`, `-n` non-interactive mode, memguard dependency
