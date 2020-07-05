@@ -1,13 +1,11 @@
-BINDIR?=/usr/local/bin
+GOPATH?=$(USER)/go
+BINDIR?=$(GOPATH)/bin
 MANDIR?=/usr/local/man
 
-shh:
-	go build .
-
-install: shh
-	mkdir -m755 -p $(BINDIR) $(MANDIR)/man1
+install:
+	go get -u egt.run/shh
+	mkdir -m755 -p $(MANDIR)/man1
 	cp man/man1/shh.1 $(MANDIR)/man1/
-	mv shh /usr/local/bin/shh
 .PHONY: install
 
 clean:

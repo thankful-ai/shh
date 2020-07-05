@@ -26,7 +26,6 @@ the rational for this as well as example uses of the command.
 
 ```
 $ git clone git@git.sr.ht:~egtann/shh && cd shh
-$ make
 $ sudo make install
 ```
 
