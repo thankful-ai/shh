@@ -3,7 +3,7 @@ BINDIR?=$(GOPATH)/bin
 MANDIR?=/usr/local/man
 
 $(BINDIR)/shh:
-	go get -u egt.run/shh
+	go get -u github.com/thankful-ai/shh
 
 install: $(BINDIR)/shh
 	mkdir -m755 -p $(MANDIR)/man1

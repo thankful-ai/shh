@@ -6,26 +6,10 @@ safe to commit to version control software like git.
 Unlike Hashicorp Vault, shh(1) requires no infrastructure. There's no server to
 manage and secure -- just a single file.
 
-> **NOTE:** This code has not been audited, and was not written by an expert
-> cryptographer. Caveat emptor.
->
-> While I make every effort to follow Go stdlib's crypto examples closely and
-> research best practices, I am not an expert in the field. There might be
-> vulnerabilities, and some might be severe. Until this is audited, you should
-> treat secrets stored by shh as "better than plaintext, but not by much."
->
-> If you have a background in cryptography and wish to help audit or provide
-> feedback, please reach out on the [mailing
-> list](mailto:~egtann/shh@lists.sr.ht).
-
-See this article on [Secret
-Management](https://www.egt.run/~egtann/better-secret-management) to understand
-the rational for this as well as example uses of the command.
-
 ## Install
 
 ```
-$ git clone git@git.sr.ht:~egtann/shh && cd shh
+$ git clone git@github.com/thankful-ai/shh && cd shh
 $ make
 $ sudo make install
 ```
@@ -52,11 +36,6 @@ As of v1.8.0, the following security vulnerability is fixed:
   AES-CFB did not include any authentication mechanism. Switching to AES-GCM
   prevents this attack. You should regenerate any keys that were stored in .shh
   and shared.
-
-## Contact
-
-To report bugs, discuss functionality or submit patches, email [this
-list](mailto:~egtann/all@lists.sr.ht).
 
 ## Future improvements
 
