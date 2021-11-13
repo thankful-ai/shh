@@ -14,6 +14,10 @@ $ make
 $ sudo make install
 ```
 
+## Usage Information
+
+man ssh
+
 After installation, check the man pages for usage information for shh(1).
 
 ## Encryption details
