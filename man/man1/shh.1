@@ -86,7 +86,7 @@ Add Alice to the project and grant access to all secrets namespaced under
 "staging":
 .Bd -literal -offset indent
 shh add-user alice@example.com "$(cat alice_id_rsa.pub)"
-shh allow alice@example.com "staging/*"
+shh allow alice@example.com "thankful/staging/*"
 .Ed
 .Pp
 See the difference in secrets granted between two users:
