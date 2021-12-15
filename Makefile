@@ -17,4 +17,4 @@ install-docs:
 
 uninstall-docs:
 	rm -f $(MANDIR)/man1/shh.1
-.PHONY: uninstall
+.PHONY: uninstall-docs
