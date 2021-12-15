@@ -10,13 +10,15 @@ manage and secure -- just a single file.
 
 ```
 $ git clone git@github.com/thankful-ai/shh && cd shh
-$ make
-$ sudo make install
+$ make install
+$ sudo make install-docs
 ```
 
 ## Usage Information
 
+```
 man ssh
+```
 
 After installation, check the man pages for usage information for shh(1).
 
