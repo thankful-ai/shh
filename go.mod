@@ -5,7 +5,7 @@ go 1.17
 require (
 	github.com/awnumar/memguard v0.22.2
 	golang.org/x/crypto v0.0.0-20211209193657-4570a0811e8b
-	golang.org/x/sys v0.0.0-20211214234402-4825e8c3871d
+	golang.org/x/sys v0.7.0
 )
 
 require (
